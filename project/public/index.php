@@ -34,6 +34,7 @@ require_once __DIR__ . '/../api/middleware/AuthMiddleware.php';
 // (⚠️ filenames must match exactly)
 // ===============================
 require_once __DIR__ . '/../api/models/user.php';
+require_once '../api/models/RefreshToken.php';
 require_once __DIR__ . '/../api/models/patients.php';
 
 // ===============================
@@ -70,4 +71,5 @@ $method = $_SERVER['REQUEST_METHOD'];
 // ===============================
 // ROUTE REQUEST
 // ===============================
+
 Router::route($uri, $method, $body);
