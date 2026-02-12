@@ -2,7 +2,9 @@
 
 class AuthController {
 
+    // ==============================
     // 🔹 REGISTER
+    // ==============================
     public static function register($data) {
 
         if (!$data) {
@@ -30,103 +32,140 @@ class AuthController {
         );
 
         Response::json(201, "User registered");
-    } // ✅ register closed properly
+    }
 
 
-    // 🔹 LOGIN (access + refresh token)
-    public static function login($data) {
+    // ==============================
+    // 🔹 LOGIN
+    // ==============================
+    public static function login($data)
+{
+    if (!$data) {
+        Response::json(400, "Request body missing");
+    }
 
-        if (!$data) {
-            Response::json(400, "Request body missing");
-        }
+    if (empty($data['email']) || empty($data['password'])) {
+        Response::json(400, "Email and password required");
+    }
 
-        if (empty($data['email']) || empty($data['password'])) {
-            Response::json(400, "Email and password required");
-        }
+    $user = User::findByEmail($data['email']);
 
-        $user = User::findByEmail($data['email']);
+    if (!$user || !password_verify($data['password'], $user['password'])) {
+        Response::json(401, "Invalid credentials");
+    }
 
-        if (!$user || !password_verify($data['password'], $user['password'])) {
-            Response::json(401, "Invalid credentials");
-        }
+    // 🔥 Generate Refresh Token
+    $refreshToken = bin2hex(random_bytes(40));
 
-        // ACCESS TOKEN
-        $accessToken = JWT::generate([
-            "user_id" => $user['id'],
-            "email"   => $user['email'],
-            "iat"     => time(),
-            "exp"     => time() + JWT_EXPIRY
-        ]);
+    // 🔥 Hash refresh token for DB
+    $refreshTokenHash = password_hash($refreshToken, PASSWORD_DEFAULT);
 
-        // REFRESH TOKEN
-        $refreshToken = bin2hex(random_bytes(40));
-        User::updateRefreshToken($user['id'], $refreshToken);
+    // Save refresh token in DB (update your table accordingly)
+    RefreshToken::deleteByUserId($user['id']);
+    RefreshToken::create($user['id'], $refreshTokenHash);
 
-        setcookie("refresh_token", $refreshToken, [
-            "httponly" => true,
-            "secure"   => false,
-            "path"     => "/",
-            "samesite" => "Strict"
-        ]);
+    // 🔥 Create HMAC binding
+    $binding = hash_hmac('sha256', $refreshToken, JWT_SECRET);
 
-        Response::json(200, "Login success", [
-            "access_token" => $accessToken,
-            "expires_in"   => JWT_EXPIRY
-        ]);
-    } // ✅ login closed properly
+    // 🔥 Generate Access Token
+    $accessToken = JWT::generate([
+        "user_id" => $user['id'],
+        "bind"    => $binding,
+        "iat"     => time(),
+        "exp"     => time() + JWT_EXPIRY
+    ]);
 
+    // 🔥 Store refresh token in cookie
+    setcookie("refresh_token", $refreshToken, [
+        "expires"  => time() + (60*60*24*7),
+        "httponly" => true,
+        "secure"   => false,
+        "path"     => "/",
+        "samesite" => "Strict"
+    ]);
 
+    $expiryTime = time() + JWT_EXPIRY;
+
+Response::json(200, "Login success", [
+    "access_token" => $accessToken,
+    "expires_in"   => JWT_EXPIRY,          // seconds
+    
+]);
+
+    
+}
+
+    // ==============================
     // 🔹 REFRESH TOKEN
-    public static function refresh() {
+    // ==============================
+    public static function refresh()
+{
+    $refreshToken = $_COOKIE['refresh_token'] ?? null;
 
-        $refreshToken = $_COOKIE['refresh_token'] ?? null;
+    if (!$refreshToken) {
+        Response::json(401, "Refresh token missing");
+    }
 
-        if (!$refreshToken) {
-            Response::json(401, "Refresh token missing");
+    $db = Database::connect();
+    $result = $db->query("SELECT * FROM refresh_tokens");
+
+    // ✅ If table empty
+    if ($result->num_rows === 0) {
+        Response::json(401, "refresh token not found ");
+    }
+
+    $validToken = null;
+
+    while ($row = $result->fetch_assoc()) {
+        if (password_verify($refreshToken, $row['token_hash'])) {
+            $validToken = $row;
+            break;
         }
+    }
 
-        $user = User::findByRefreshToken($refreshToken);
+    // ✅ If rows exist but none matched
+    if (!$validToken) {
+        Response::json(401, "refresh token not found");
+    }
 
-        if (!$user) {
-            Response::json(401, "Invalid refresh token");
-        }
+    // Optional expiry check
+    if (isset($validToken['expires_at']) && 
+        strtotime($validToken['expires_at']) < time()) {
+        Response::json(401, "Refresh token expired");
+    }
 
-        $newAccessToken = JWT::generate([
-            "user_id" => $user['id'],
-            "email"   => $user['email'],
-            "iat"     => time(),
-            "exp"     => time() + JWT_EXPIRY
-        ]);
+    $binding = hash_hmac('sha256', $refreshToken, JWT_SECRET);
 
-        $newRefreshToken = bin2hex(random_bytes(40));
-        User::updateRefreshToken($user['id'], $newRefreshToken);
+    $newAccessToken = JWT::generate([
+        "user_id" => $validToken['user_id'],
+        "bind"    => $binding,
+        "iat"     => time(),
+        "exp"     => time() + JWT_EXPIRY
+    ]);
 
-        setcookie("refresh_token", $newRefreshToken, [
-            "httponly" => true,
-            "secure"   => false,
-            "path"     => "/",
-            "samesite" => "Strict"
-        ]);
-
-        Response::json(200, "Token refreshed", [
-            "access_token" => $newAccessToken,
-            "expires_in"   => JWT_EXPIRY
-        ]);
-    } // ✅ refresh closed properly
+    Response::json(200, "Token refreshed", [
+        "access_token" => $newAccessToken,
+        "expires_in" => JWT_EXPIRY
+    ]);
+}
 
 
+
+
+    // ==============================
     // 🔹 LOGOUT
-    public static function logout() {
+    // ==============================
+    public static function logout()
+{
+    $refreshToken = $_COOKIE['refresh_token'] ?? null;
 
-        $refreshToken = $_COOKIE['refresh_token'] ?? null;
+    if ($refreshToken) {
+        RefreshToken::deleteByToken($refreshToken); // ✅ correct
+    }
 
-        if ($refreshToken) {
-            User::clearRefreshToken($refreshToken);
-        }
+    setcookie("refresh_token", "", time() - 3600, "/");
 
-        setcookie("refresh_token", "", time() - 3600, "/");
+    Response::json(200, "Logged out");
+}
 
-        Response::json(200, "Logged out");
-    } // ✅ logout closed properly
-
-} // ✅ CLASS CLOSED
+}
